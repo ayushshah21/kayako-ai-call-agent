@@ -1,0 +1,43 @@
+{
+  "name": "kayako-ai-call-agent",
+  "version": "1.0.0",
+  "description": "AI-powered call assistant for Kayako support",
+  "main": "dist/backend/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/backend/server.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/backend/server.ts",
+    "tunnel": "concurrently \"ts-node-dev --respawn --transpile-only src/backend/server.ts\" \"npx ngrok http 3000\"",
+    "explore": "ts-node src/scripts/exploreKayako.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "kayako",
+    "ai",
+    "support",
+    "twilio"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google-cloud/speech": "^6.7.0",
+    "@types/ws": "^8.5.14",
+    "axios": "^1.7.9",
+    "body-parser": "^1.20.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "twilio": "^5.4.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/body-parser": "^1.19.5",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "@types/twilio": "^3.19.3",
+    "concurrently": "^9.1.2",
+    "ngrok": "^5.0.0-beta.2",
+    "nodemon": "^3.1.9",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.7.3"
+  }
+}

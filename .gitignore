@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+temp/
+tmp/
+
+# Google Cloud credentials
+config/google-credentials.json
+**/google-credentials*.json
+
+# Cache directories
+.npm/
+.eslintcache
+
+# Test coverage
+coverage/
+
+# Temporary files
+*.tmp
+*.temp

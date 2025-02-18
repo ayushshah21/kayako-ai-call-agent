@@ -1,4 +1,4 @@
-# Kayako AI Call Assistant – Product Requirements
+# Kayako AI Call Assistant - Product Requirements
 
 ## Problem Statement
 
@@ -90,10 +90,10 @@ AI (no KB match): "I'll pass this on to our expert support team. They'll follow 
 
 ## Benefits & Takeaways
 
-- Faster response times – AI handles common questions instantly
-- Reduced agent workload – AI resolves simple issues, leaving complex cases for experts
-- Seamless customer experience – AI speaks naturally and provides immediate answers
-- Automatic ticketing – Ensures no customer request is lost
+- Faster response times - AI handles common questions instantly
+- Reduced agent workload - AI resolves simple issues, leaving complex cases for experts
+- Seamless customer experience - AI speaks naturally and provides immediate answers
+- Automatic ticketing - Ensures no customer request is lost
 
 ## User Stories & Acceptance Criteria
 
