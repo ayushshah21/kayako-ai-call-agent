@@ -27,7 +27,8 @@ const activeCalls: Map<string, {
     recognizeStream: any,
     lastResponse: number,
     pendingTranscript: string,
-    lastTranscriptTime: number
+    lastTranscriptTime: number,
+    lastActivityTime: number
 }> = new Map();
 
 /**
@@ -106,7 +107,7 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
     let isProcessingResponse = false;
 
     // Set up Google Speech streaming
-    const recognizeStream = googleSpeech.createStreamingRecognition();
+    let recognizeStream = googleSpeech.createStreamingRecognition();
 
     // Track this call's streams
     activeCalls.set(callSid, {
@@ -114,7 +115,8 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
         recognizeStream,
         lastResponse: Date.now(),
         pendingTranscript: '',
-        lastTranscriptTime: Date.now()
+        lastTranscriptTime: Date.now(),
+        lastActivityTime: Date.now()
     });
 
     // Handle incoming media
@@ -124,11 +126,25 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
         try {
             const msg = JSON.parse(message);
             if (msg.event === 'media' && isCallActive) {
+                // Reset activity timer on any media received
+                const callData = activeCalls.get(callSid);
+                if (callData) {
+                    callData.lastActivityTime = Date.now();
+                }
+
                 // Convert Twilio's base64 audio to a buffer
                 const audioBuffer = Buffer.from(msg.media.payload, 'base64');
 
-                // Only write if stream is writable and not destroyed
-                if (recognizeStream && !recognizeStream.destroyed && recognizeStream.writable) {
+                // Ensure stream is ready and writable
+                if (recognizeStream && !recognizeStream.destroyed) {
+                    if (!recognizeStream.writable) {
+                        // If stream isn't writable, recreate it
+                        console.log('Recreating recognition stream for call:', callSid);
+                        recognizeStream = googleSpeech.createStreamingRecognition();
+                        if (callData) {
+                            callData.recognizeStream = recognizeStream;
+                        }
+                    }
                     recognizeStream.write(audioBuffer);
                 }
             } else if (msg.event === 'stop') {
@@ -136,8 +152,16 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                 isCallActive = false;
                 await cleanupCall(callSid);
             }
-        } catch (error) {
+        } catch (error: unknown) {
             console.error('Error processing media:', error);
+            // Don't terminate on non-critical errors
+            if (error instanceof Error &&
+                (error.message.includes('EPIPE') || error.message.includes('ERR_STREAM_DESTROYED'))) {
+                console.log('Recoverable error, continuing...');
+            } else {
+                isCallActive = false;
+                await cleanupCall(callSid);
+            }
         }
     });
 
@@ -176,22 +200,61 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
         // Always log transcription immediately for debugging
         console.log('Real-time transcription:', transcription, 'isFinal:', result.isFinal);
 
-        // Update the pending transcript immediately for any non-empty transcription
+        // Start transcription immediately for any non-empty input
         if (transcription.trim()) {
-            if (result.isFinal) {
-                // Check for user interruption immediately - if we detect any speech during response
-                if (isProcessingResponse && transcription.trim()) {
-                    console.log('User interruption detected:', transcription);
+            // Reset the response timer on any new speech
+            callData.lastTranscriptTime = now;
+
+            // For non-final results, check for potential interruptions
+            if (!result.isFinal) {
+                // Detect user starting to speak with more lenient criteria
+                if (isProcessingResponse &&
+                    transcription.trim().length > 8 && // Reduced from 15 to detect speech earlier
+                    !transcription.toLowerCase().match(/^(um|uh|okay|oh)\b/i)) {
+
+                    console.log('User started speaking, stopping current response');
+                    // Immediately stop the current response
                     isProcessingResponse = false;
 
-                    // Immediately process the new input
-                    callData.pendingTranscript = transcription;
-                    callData.lastTranscriptTime = now;
+                    // Send a silent gather to stop current speech and start listening
+                    const interruptTwiml = new VoiceResponse();
+                    const gather = interruptTwiml.gather({
+                        input: ['speech'],
+                        timeout: 15,
+                        action: '/voice/continue',
+                        actionOnEmptyResult: true
+                    });
+                    gather.pause({ length: 0.1 });
 
-                    // Process the interruption immediately if it's a complete thought
-                    if (isCompleteSentence(transcription) || transcription.length > 15) {
+                    try {
+                        await client.calls(callSid).update({
+                            twiml: interruptTwiml.toString()
+                        });
+                        console.log('Successfully interrupted current response');
+                    } catch (error) {
+                        console.error('Error interrupting response:', error);
+                    }
+
+                    // Start preparing for potential response while waiting for final result
+                    callData.pendingTranscript = transcription;
+                }
+            } else {
+                // For final results, handle with more context
+                if (isProcessingResponse) {
+                    // Verify this is a real interruption with slightly relaxed criteria
+                    const isRealInterruption =
+                        transcription.trim().length > 15 && // Reduced from 20
+                        !transcription.toLowerCase().includes('thank') &&
+                        !transcription.toLowerCase().match(/^(um|uh|like|so|and|but|okay)\b/i) &&
+                        Date.now() - callData.lastResponse > 1500; // Reduced from 2000ms
+
+                    if (isRealInterruption) {
+                        console.log('Confirmed interruption detected:', transcription);
+                        isProcessingResponse = false;
+
+                        // Process the interruption immediately
                         const finalTranscript = transcription.trim();
-                        console.log('Processing interruption immediately:', finalTranscript);
+                        console.log('Processing confirmed interruption:', finalTranscript);
 
                         // Add user's message to conversation history
                         conversationManager.addToHistory(callSid, 'user', finalTranscript);
@@ -201,8 +264,8 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                         if (conversationState) {
                             isProcessingResponse = true;
 
-                            // Generate and handle the response
                             try {
+                                // Generate and handle the response
                                 const responsePromise = responseGenerator.generateResponse(
                                     finalTranscript,
                                     conversationState,
@@ -240,30 +303,24 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                         }
                     }
                 } else {
+                    // Update pending transcript for non-interruption case
                     callData.pendingTranscript += ' ' + transcription;
                     callData.lastTranscriptTime = now;
-                }
-                console.log('Accumulated transcription:', callData.pendingTranscript);
-            } else {
-                // For non-final results, still check for potential interruptions
-                if (isProcessingResponse && transcription.trim().length > 10) {
-                    console.log('Potential interruption detected in interim result:', transcription);
-                    // Don't stop processing yet, but prepare for potential interruption
                 }
             }
         }
 
-        // Check if we should process the accumulated transcript
+        // Check if we should process the accumulated transcript with more responsive timing
         const timeSinceLastTranscript = now - callData.lastTranscriptTime;
         const hasCompleteSentence = isCompleteSentence(callData.pendingTranscript);
-        const isLongEnoughPause = timeSinceLastTranscript > 1000; // Reduced from 1500ms to 1000ms
+        const isLongEnoughPause = timeSinceLastTranscript > 600; // Reduced from 800ms
 
         if (result.isFinal &&
             callData.pendingTranscript.trim() &&
             (hasCompleteSentence || isLongEnoughPause)) {
 
-            // Avoid responding too frequently
-            if (now - callData.lastResponse < 1000) return;
+            // More responsive rate limiting
+            if (now - callData.lastResponse < 400) return; // Reduced from 500ms
 
             try {
                 const finalTranscript = callData.pendingTranscript.trim();
@@ -319,49 +376,35 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                     {
                         streamCallback: async (partial) => {
                             try {
-                                console.log('Received partial response:', partial);
-
                                 // Don't process if call is no longer active
                                 if (!isCallActive || !isProcessingResponse) {
                                     console.log('Call no longer active or not processing, skipping partial response');
                                     return;
                                 }
 
-                                // For common Q&A or instant responses, send immediately
+                                // For first chunk or common Q&A responses, send immediately
                                 if (isFirstChunk) {
                                     console.log('First chunk, sending immediate response');
 
-                                    // Wait for a complete sentence before sending first chunk
-                                    if (partial.length < 20 || !isCompleteSentence(partial)) {
+                                    // Wait for a complete thought before sending first chunk
+                                    if (partial.length < 15 || !isCompleteSentence(partial)) {
                                         console.log('Waiting for more complete first chunk');
                                         return;
                                     }
 
                                     const immediateTwiml = new VoiceResponse();
-
-                                    // Don't use gather for the first response to ensure continuous playback
                                     immediateTwiml.say({
                                         voice: 'Polly.Amy-Neural',
                                         language: 'en-GB'
                                     }, partial);
 
-                                    // Add gather after response to keep connection open and listen for follow-up
+                                    // Add gather after response to keep listening
                                     const gather = immediateTwiml.gather({
                                         input: ['speech'],
                                         timeout: 15,
                                         action: '/voice/continue',
                                         actionOnEmptyResult: true
                                     });
-
-                                    // Add a subtle prompt for follow-up
-                                    gather.pause({ length: 0.5 });
-                                    gather.say({
-                                        voice: 'Polly.Amy-Neural',
-                                        language: 'en-GB'
-                                    }, "What else would you like to know?");
-
-                                    // Add a longer pause to keep the connection open
-                                    gather.pause({ length: 5 });
 
                                     console.log('Sending first complete chunk:', partial);
                                     await client.calls(callSid).update({
@@ -376,10 +419,8 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                                 }
 
                                 // For subsequent chunks, ensure minimum time between chunks
-                                const now = Date.now();
-                                const timeSinceLastChunk = now - lastChunkSent;
-                                if (timeSinceLastChunk < 1000) { // Increased to 1 second minimum between chunks
-                                    console.log('Waiting for larger time gap between chunks');
+                                const timeSinceLastChunk = Date.now() - lastChunkSent;
+                                if (timeSinceLastChunk < 500) { // Reduced from 1000ms to 500ms
                                     return;
                                 }
 
@@ -388,47 +429,38 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
 
                                 // Get new content since last sent
                                 const newContent = accumulatedResponse.slice(lastSentLength);
-                                if (!newContent.trim() || newContent.length < 10) {
-                                    console.log('Waiting for more substantial content');
-                                    return;
-                                }
-
-                                // Find sentence breaks
-                                const sentences = newContent.match(/[^.!?]+[.!?]+/g) || [];
-                                if (sentences.length === 0) {
-                                    console.log('No complete sentences found in new content');
-                                    return;
-                                }
+                                if (!newContent.trim()) return;
 
                                 // Send complete sentences
+                                const sentences = newContent.match(/[^.!?]+[.!?]+/g) || [];
+                                if (sentences.length === 0) return;
+
                                 const chunkToSend = sentences.join(' ').trim();
                                 console.log('Sending complete sentences:', chunkToSend);
 
                                 const chunkTwiml = new VoiceResponse();
-                                chunkTwiml.say({
+                                const gather = chunkTwiml.gather({
+                                    input: ['speech'],
+                                    timeout: 15,
+                                    action: '/voice/continue',
+                                    actionOnEmptyResult: true
+                                });
+
+                                gather.say({
                                     voice: 'Polly.Amy-Neural',
                                     language: 'en-GB'
                                 }, chunkToSend);
 
-                                // Add natural pause
-                                chunkTwiml.pause({ length: 0.3 });
-
                                 // Send chunk
-                                console.log('Updating call with next chunk...');
                                 await client.calls(callSid).update({
                                     twiml: chunkTwiml.toString()
                                 });
-                                console.log('Chunk sent successfully');
 
                                 lastSentLength += chunkToSend.length;
-                                lastChunkSent = now;
+                                lastChunkSent = Date.now();
 
                             } catch (error) {
                                 console.error('Error in stream callback:', error);
-                                if (error instanceof Error) {
-                                    console.error('Error details:', error.message);
-                                    console.error('Stack trace:', error.stack);
-                                }
                             }
                         }
                     }
@@ -469,13 +501,8 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                                 actionOnEmptyResult: true
                             });
 
-                            gather.pause({ length: 0.5 });
-                            gather.say({
-                                voice: 'Polly.Amy-Neural',
-                                language: 'en-GB'
-                            }, "What else would you like to know?");
-
-                            gather.pause({ length: 5 });
+                            // Keep the connection open with a subtle prompt
+                            gather.pause({ length: 0.3 });
 
                             console.log('Updating call with immediate response');
                             await client.calls(callSid).update({
@@ -484,8 +511,33 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                             console.log('Immediate response sent successfully');
                         }
                     } else if (raceResult.type === 'timeout' && !accumulatedResponse) {
+                        // Handle potential off-topic questions here
+                        const isOffTopic = !finalTranscript.toLowerCase().includes('kayako') &&
+                            !finalTranscript.toLowerCase().includes('support') &&
+                            !finalTranscript.toLowerCase().includes('help');
+
+                        if (isOffTopic) {
+                            console.log('Handling off-topic query with redirection');
+                            const redirectTwiml = new VoiceResponse();
+                            const gather = redirectTwiml.gather({
+                                input: ['speech'],
+                                timeout: 15,
+                                action: '/voice/continue',
+                                actionOnEmptyResult: true
+                            });
+
+                            gather.say({
+                                voice: 'Polly.Amy-Neural',
+                                language: 'en-GB'
+                            }, "I'm specifically trained to help with Kayako's customer support platform. What would you like to know about Kayako's features or capabilities?");
+
+                            await client.calls(callSid).update({
+                                twiml: redirectTwiml.toString()
+                            });
+                            return;
+                        }
+
                         console.log('Sending acknowledgment due to timeout');
-                        // Only send acknowledgment if we hit the timeout and haven't started streaming yet
                         const searchingTwiml = new VoiceResponse();
                         const gather = searchingTwiml.gather({
                             input: ['speech'],
@@ -553,29 +605,26 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
 
                 } catch (error) {
                     console.error('Error in response handling:', error);
-                    if (error instanceof Error) {
-                        console.error('Error details:', error.message);
-                        console.error('Stack trace:', error.stack);
-                    }
-                    isProcessingResponse = false;
 
-                    // Send error response to user
+                    // Send a recovery response instead of ending the call
                     const errorTwiml = new VoiceResponse();
-                    const errorGather = errorTwiml.gather({
+                    const gather = errorTwiml.gather({
                         input: ['speech'],
-                        timeout: 10,
+                        timeout: 15,
                         action: '/voice/continue',
                         actionOnEmptyResult: true
                     });
 
-                    errorGather.say({
+                    gather.say({
                         voice: 'Polly.Amy-Neural',
                         language: 'en-GB'
-                    }, "I apologize, I encountered an error. Could you please repeat your question?");
+                    }, "I'm here to help with questions about Kayako. What would you like to know about our customer support platform?");
 
                     await client.calls(callSid).update({
                         twiml: errorTwiml.toString()
                     });
+
+                    isProcessingResponse = false;
                 }
             } catch (error) {
                 console.error('Error in response generation:', error);

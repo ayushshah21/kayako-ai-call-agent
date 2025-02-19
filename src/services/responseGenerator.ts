@@ -188,10 +188,14 @@ export class ResponseGenerator {
             return this.conversationalResponses[normalizedQuery];
         }
 
-        // Check partial matches
-        for (const [phrase, response] of Object.entries(this.conversationalResponses)) {
-            if (normalizedQuery.includes(phrase)) {
-                return response;
+        // Only check partial matches if the query is very short and conversational
+        if (normalizedQuery.length < 20 && !normalizedQuery.includes('kayako')) {
+            for (const [phrase, response] of Object.entries(this.conversationalResponses)) {
+                // Only match if the phrase is a significant part of the query
+                if (normalizedQuery.includes(phrase) &&
+                    phrase.length > normalizedQuery.length / 2) {
+                    return response;
+                }
             }
         }
 
@@ -200,6 +204,7 @@ export class ResponseGenerator {
 
     private async callGeminiWithRetry(prompt: string, maxRetries: number = 3): Promise<string> {
         let lastError: Error | null = null;
+        let fallbackModel = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
@@ -210,15 +215,41 @@ export class ResponseGenerator {
                     await new Promise(resolve => setTimeout(resolve, this.RATE_LIMIT_DELAY - timeSinceLastCall));
                 }
 
-                // Exponential backoff if this is a retry
+                // Try cached response first on retry attempts
                 if (attempt > 1) {
-                    const backoffTime = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
-                    console.log(`Retry attempt ${attempt}, waiting ${backoffTime}ms...`);
-                    await new Promise(resolve => setTimeout(resolve, backoffTime));
+                    const cacheKey = this.generateCacheKey(prompt);
+                    const cachedResponse = this.responseCache.get(cacheKey);
+                    if (cachedResponse && Date.now() - cachedResponse.timestamp < this.CACHE_TTL) {
+                        console.log('Using cached response on retry attempt');
+                        return cachedResponse.response;
+                    }
+
+                    // Try common Q&A as second fallback
+                    const commonQA = this.matchCommonQA(prompt);
+                    if (commonQA) {
+                        console.log('Using common Q&A on retry attempt');
+                        return commonQA.response;
+                    }
                 }
 
+                // Initialize fallback model if needed
+                if (attempt === maxRetries && !fallbackModel) {
+                    console.log('Initializing fallback model...');
+                    fallbackModel = this.genAI.getGenerativeModel({
+                        model: 'gemini-1.0-pro',
+                        generationConfig: {
+                            temperature: 0.7,
+                            topP: 0.9,
+                            maxOutputTokens: 1024,
+                        }
+                    });
+                }
+
+                // Use fallback model on last attempt if main model failed
+                const modelToUse = (attempt === maxRetries && fallbackModel) ? fallbackModel : this.model;
+
                 const result = await Promise.race([
-                    this.model.generateContent(prompt),
+                    modelToUse.generateContent(prompt),
                     new Promise((_, reject) =>
                         setTimeout(() => reject(new Error('Gemini request timeout')), 8000)
                     )
@@ -230,54 +261,30 @@ export class ResponseGenerator {
                 lastError = error;
                 console.log(`Attempt ${attempt} failed:`, error.message);
 
-                // If it's a 503 error, try the fallback model
-                if (error.status === 503 && attempt === maxRetries) {
-                    console.log('Trying fallback model...');
+                // Special handling for 503 errors
+                if (error.status === 503) {
+                    // Immediate fallback to simpler response
+                    const simplifiedPrompt = `Give a very brief 1-2 sentence response about Kayako's features based on: ${prompt.slice(-100)}`;
                     try {
-                        const fallbackModel = this.genAI.getGenerativeModel({
-                            model: 'gemini-1.0-pro',
-                            generationConfig: {
-                                temperature: 0.7,
-                                topP: 0.9,
-                                maxOutputTokens: 2048,
-                            }
-                        });
-
-                        const fallbackResult = await fallbackModel.generateContent(prompt);
-                        return fallbackResult.response.text();
+                        if (fallbackModel) {
+                            const fallbackResult = await fallbackModel.generateContent(simplifiedPrompt);
+                            return fallbackResult.response.text();
+                        }
                     } catch (fallbackError) {
                         console.error('Fallback model also failed:', fallbackError);
-                        // Continue to error handling
                     }
                 }
 
-                // For rate limit errors, wait longer before retry
+                // For rate limit errors, wait longer
                 if (error.status === 429) {
                     const waitTime = attempt * 2000;
                     await new Promise(resolve => setTimeout(resolve, waitTime));
                 }
-
-                // On last attempt, check if we have a cached response
-                if (attempt === maxRetries) {
-                    const cacheKey = this.generateCacheKey(prompt);
-                    const cachedResponse = this.responseCache.get(cacheKey);
-                    if (cachedResponse && Date.now() - cachedResponse.timestamp < this.CACHE_TTL) {
-                        console.log('Using cached response as fallback');
-                        return cachedResponse.response;
-                    }
-
-                    // If no cache, check common Q&As as last resort
-                    const commonQA = this.matchCommonQA(prompt);
-                    if (commonQA) {
-                        console.log('Using common Q&A as fallback');
-                        return commonQA.response;
-                    }
-                }
             }
         }
 
-        // If all retries and fallbacks fail, throw a user-friendly error
-        throw new Error('I apologize, but our system is experiencing high load right now. Please try your question again in a moment.');
+        // Final fallback if all retries fail
+        return "Kayako offers comprehensive customer support features including multi-channel support, automation, and ticketing. What specific aspect would you like to know more about?";
     }
 
     async generateResponse(
@@ -287,11 +294,13 @@ export class ResponseGenerator {
     ): Promise<string> {
         console.log('Starting response generation for query:', query);
 
-        // First, check for conversational responses (fastest path)
-        const conversationalResponse = this.checkConversationalResponse(query);
-        if (conversationalResponse) {
-            console.log('Found instant conversational response');
-            return conversationalResponse;
+        // Skip conversational responses for Kayako-related queries
+        if (!query.toLowerCase().includes('kayako')) {
+            const conversationalResponse = this.checkConversationalResponse(query);
+            if (conversationalResponse) {
+                console.log('Found instant conversational response');
+                return conversationalResponse;
+            }
         }
 
         // Then check common Q&As
@@ -367,19 +376,29 @@ Response:`;
             const streamingResponse = await this.model.generateContentStream(prompt);
             console.log('Got streaming response from Gemini');
             let fullResponse = '';
+            let lastChunkLength = 0;
 
             for await (const chunk of streamingResponse.stream) {
                 console.log('Received chunk from Gemini');
                 const chunkText = chunk.text();
-                console.log('Chunk text:', chunkText);
                 fullResponse += chunkText;
 
                 if (options.streamCallback) {
-                    console.log('Calling stream callback with text:', fullResponse);
+                    // Only send if we have new content and it's a complete thought
+                    const newContent = fullResponse.slice(lastChunkLength);
+                    if (newContent.trim() && this.isCompleteSentence(newContent)) {
+                        console.log('Sending new complete chunk:', newContent);
+                        await options.streamCallback(fullResponse);
+                        lastChunkLength = fullResponse.length;
+                    }
+                }
+            }
+
+            // Send any remaining content in one final chunk
+            if (options.streamCallback && fullResponse.length > lastChunkLength) {
+                const finalContent = fullResponse.slice(lastChunkLength);
+                if (finalContent.trim()) {
                     await options.streamCallback(fullResponse);
-                    console.log('Stream callback completed');
-                } else {
-                    console.log('No stream callback provided');
                 }
             }
 
@@ -412,5 +431,18 @@ Response:`;
             timestamp: Date.now(),
             confidence
         });
+    }
+
+    // Helper function to check if text is a complete thought
+    private isCompleteSentence(text: string): boolean {
+        const trimmed = text.trim();
+        if (trimmed.length < 15) return false;
+
+        // Check for sentence endings
+        if (/[.!?]/.test(trimmed)) return true;
+
+        // Check for complete clause structure
+        const words = trimmed.split(/\s+/);
+        return words.length >= 4;
     }
 } 
