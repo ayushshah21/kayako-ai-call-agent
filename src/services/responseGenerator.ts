@@ -199,6 +199,8 @@ export class ResponseGenerator {
     }
 
     private async callGeminiWithRetry(prompt: string, maxRetries: number = 3): Promise<string> {
+        let lastError: Error | null = null;
+
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 // Rate limiting
@@ -206,6 +208,13 @@ export class ResponseGenerator {
                 const timeSinceLastCall = now - this.lastGeminiCall;
                 if (timeSinceLastCall < this.RATE_LIMIT_DELAY) {
                     await new Promise(resolve => setTimeout(resolve, this.RATE_LIMIT_DELAY - timeSinceLastCall));
+                }
+
+                // Exponential backoff if this is a retry
+                if (attempt > 1) {
+                    const backoffTime = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+                    console.log(`Retry attempt ${attempt}, waiting ${backoffTime}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, backoffTime));
                 }
 
                 const result = await Promise.race([
@@ -218,15 +227,57 @@ export class ResponseGenerator {
                 this.lastGeminiCall = Date.now();
                 return result.response.text();
             } catch (error: any) {
-                if (error.status === 429 && attempt < maxRetries) {
-                    // Rate limit hit, wait longer before retry
-                    await new Promise(resolve => setTimeout(resolve, attempt * 2000));
-                    continue;
+                lastError = error;
+                console.log(`Attempt ${attempt} failed:`, error.message);
+
+                // If it's a 503 error, try the fallback model
+                if (error.status === 503 && attempt === maxRetries) {
+                    console.log('Trying fallback model...');
+                    try {
+                        const fallbackModel = this.genAI.getGenerativeModel({
+                            model: 'gemini-1.0-pro',
+                            generationConfig: {
+                                temperature: 0.7,
+                                topP: 0.9,
+                                maxOutputTokens: 2048,
+                            }
+                        });
+
+                        const fallbackResult = await fallbackModel.generateContent(prompt);
+                        return fallbackResult.response.text();
+                    } catch (fallbackError) {
+                        console.error('Fallback model also failed:', fallbackError);
+                        // Continue to error handling
+                    }
                 }
-                throw error;
+
+                // For rate limit errors, wait longer before retry
+                if (error.status === 429) {
+                    const waitTime = attempt * 2000;
+                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                }
+
+                // On last attempt, check if we have a cached response
+                if (attempt === maxRetries) {
+                    const cacheKey = this.generateCacheKey(prompt);
+                    const cachedResponse = this.responseCache.get(cacheKey);
+                    if (cachedResponse && Date.now() - cachedResponse.timestamp < this.CACHE_TTL) {
+                        console.log('Using cached response as fallback');
+                        return cachedResponse.response;
+                    }
+
+                    // If no cache, check common Q&As as last resort
+                    const commonQA = this.matchCommonQA(prompt);
+                    if (commonQA) {
+                        console.log('Using common Q&A as fallback');
+                        return commonQA.response;
+                    }
+                }
             }
         }
-        throw new Error('Max retries exceeded for Gemini API');
+
+        // If all retries and fallbacks fail, throw a user-friendly error
+        throw new Error('I apologize, but our system is experiencing high load right now. Please try your question again in a moment.');
     }
 
     async generateResponse(
@@ -281,9 +332,9 @@ export class ResponseGenerator {
 
         // Construct prompt for more natural responses
         console.log('Constructing Gemini prompt...');
-        const prompt = `You are a helpful customer support AI assistant on a phone call.
+        const prompt = `You are a helpful customer support AI assistant on a phone call, specifically focused on Kayako's products and services.
 Use the knowledge base articles below to provide direct, concise responses.
-Focus only on answering the specific question asked.
+Focus only on answering questions about Kayako and its features.
 
 Knowledge Base Articles:
 ${articleContext}
@@ -292,26 +343,53 @@ ${conversationHistory ? `Previous Conversation:\n${conversationHistory}\n` : ''}
 Customer Query: "${query}"
 
 Guidelines for your response:
-1. Answer the question directly and immediately
-2. Use at most 2-3 short sentences
-3. Only include essential information that directly answers the question
-4. No small talk, opinions, or unnecessary explanations
-5. Maximum 50 words
-6. If you can't find a direct answer, say "I'll need to have our support team help you with that. Could you confirm your email address?"
+1. For Kayako-related questions:
+   - Answer directly and immediately
+   - Use at most 2-3 short sentences
+   - Only include essential information
+   - If you can't find a specific answer, say "I don't have that specific information, but I can tell you about [related Kayako feature]"
+
+2. For off-topic questions:
+   - Acknowledge their question briefly
+   - Redirect to Kayako-related topics naturally
+   - Example: If someone asks about a competitor, say "While I specialize in Kayako's solutions, I can tell you about how Kayako handles [relevant feature]"
+
+3. General rules:
+   - No small talk or unnecessary explanations
+   - Maximum 50 words
+   - Stay focused on Kayako's features and capabilities
+   - If completely unrelated, say "I'm specifically trained to help with Kayako's products and services. What would you like to know about Kayako's [features/capabilities/solutions]?"
 
 Response:`;
 
         try {
             console.log('Sending request to Gemini...');
-            const response = await this.callGeminiWithRetry(prompt);
+            const streamingResponse = await this.model.generateContentStream(prompt);
+            console.log('Got streaming response from Gemini');
+            let fullResponse = '';
 
-            if (response.toLowerCase().includes("i apologize") && response.toLowerCase().includes("follow up")) {
+            for await (const chunk of streamingResponse.stream) {
+                console.log('Received chunk from Gemini');
+                const chunkText = chunk.text();
+                console.log('Chunk text:', chunkText);
+                fullResponse += chunkText;
+
+                if (options.streamCallback) {
+                    console.log('Calling stream callback with text:', fullResponse);
+                    await options.streamCallback(fullResponse);
+                    console.log('Stream callback completed');
+                } else {
+                    console.log('No stream callback provided');
+                }
+            }
+
+            if (fullResponse.toLowerCase().includes("i apologize") && fullResponse.toLowerCase().includes("follow up")) {
                 conversationState.requiresHumanFollowup = true;
             }
 
             console.log('Caching response...');
-            this.cacheResponse(cacheKey, response, 0.9);
-            return response;
+            this.cacheResponse(cacheKey, fullResponse, 0.9);
+            return fullResponse;
         } catch (error: any) {
             console.error('Error in Gemini response generation:', error);
             if (error.message === 'Max retries exceeded for Gemini API') {
