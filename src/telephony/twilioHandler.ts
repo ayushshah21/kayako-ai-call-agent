@@ -28,8 +28,15 @@ const activeCalls: Map<string, {
     lastResponse: number,
     pendingTranscript: string,
     lastTranscriptTime: number,
-    lastActivityTime: number
+    lastActivityTime: number,
+    isProcessingResponse: boolean
 }> = new Map();
+
+let isFirstChunk = true;
+let lastSentLength = 0;
+let lastChunkSent = Date.now();
+let accumulatedResponse = '';
+let isLastChunk = false;
 
 /**
  * Handle incoming voice calls - now with streaming
@@ -116,7 +123,8 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
         lastResponse: Date.now(),
         pendingTranscript: '',
         lastTranscriptTime: Date.now(),
-        lastActivityTime: Date.now()
+        lastActivityTime: Date.now(),
+        isProcessingResponse: false
     });
 
     // Handle incoming media
@@ -144,6 +152,9 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
                         if (callData) {
                             callData.recognizeStream = recognizeStream;
                         }
+
+                        // Set up the new stream's data handler
+                        setupRecognitionStreamHandler(recognizeStream, callSid, callData);
                     }
                     recognizeStream.write(audioBuffer);
                 }
@@ -154,16 +165,518 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
             }
         } catch (error: unknown) {
             console.error('Error processing media:', error);
-            // Don't terminate on non-critical errors
             if (error instanceof Error &&
                 (error.message.includes('EPIPE') || error.message.includes('ERR_STREAM_DESTROYED'))) {
                 console.log('Recoverable error, continuing...');
+                // Try to recreate the stream
+                const callData = activeCalls.get(callSid);
+                if (callData && isCallActive) {
+                    recognizeStream = googleSpeech.createStreamingRecognition();
+                    callData.recognizeStream = recognizeStream;
+                    setupRecognitionStreamHandler(recognizeStream, callSid, callData);
+                }
             } else {
                 isCallActive = false;
                 await cleanupCall(callSid);
             }
         }
     });
+
+    // Function to set up recognition stream handler
+    function setupRecognitionStreamHandler(stream: any, sid: string, callData: any) {
+        stream.on('data', async (data: any) => {
+            const result = data.results[0];
+            if (!result) return;
+
+            const transcription = result.alternatives[0].transcript;
+            const now = Date.now();
+
+            // Always log transcription immediately for debugging
+            console.log('Real-time transcription:', transcription, 'isFinal:', result.isFinal);
+
+            // Start transcription immediately for any non-empty input
+            if (transcription.trim()) {
+                // Reset the response timer on any new speech
+                callData.lastTranscriptTime = now;
+
+                // For non-final results, check for potential interruptions
+                if (!result.isFinal) {
+                    // Detect user starting to speak with more lenient criteria
+                    if (isProcessingResponse &&
+                        transcription.trim().length > 8 && // Reduced from 15 to detect speech earlier
+                        !transcription.toLowerCase().match(/^(um|uh|okay|oh)\b/i)) {
+
+                        console.log('User started speaking, stopping current response');
+                        // Immediately stop the current response
+                        isProcessingResponse = false;
+
+                        // Send a silent gather to stop current speech and start listening
+                        const interruptTwiml = new VoiceResponse();
+                        const gather = interruptTwiml.gather({
+                            input: ['speech'],
+                            timeout: 15,
+                            action: '/voice/continue',
+                            actionOnEmptyResult: true
+                        });
+                        gather.pause({ length: 0.1 });
+
+                        try {
+                            await client.calls(sid).update({
+                                twiml: interruptTwiml.toString()
+                            });
+                            console.log('Successfully interrupted current response');
+                        } catch (error) {
+                            console.error('Error interrupting response:', error);
+                        }
+
+                        // Start preparing for potential response while waiting for final result
+                        callData.pendingTranscript = transcription;
+                    }
+                } else {
+                    // For final results, handle with more context
+                    if (isProcessingResponse) {
+                        // Verify this is a real interruption with slightly relaxed criteria
+                        const isRealInterruption =
+                            transcription.trim().length > 15 && // Reduced from 20
+                            !transcription.toLowerCase().includes('thank') &&
+                            !transcription.toLowerCase().match(/^(um|uh|like|so|and|but|okay)\b/i) &&
+                            Date.now() - callData.lastResponse > 1500; // Reduced from 2000ms
+
+                        if (isRealInterruption) {
+                            console.log('Confirmed interruption detected:', transcription);
+                            isProcessingResponse = false;
+
+                            // Process the interruption immediately
+                            const finalTranscript = transcription.trim();
+                            console.log('Processing confirmed interruption:', finalTranscript);
+
+                            // Add user's message to conversation history
+                            conversationManager.addToHistory(sid, 'user', finalTranscript);
+
+                            // Get conversation state and generate response
+                            const conversationState = conversationManager.getConversation(sid);
+                            if (conversationState) {
+                                isProcessingResponse = true;
+
+                                try {
+                                    // Generate and handle the response
+                                    const responsePromise = responseGenerator.generateResponse(
+                                        finalTranscript,
+                                        conversationState,
+                                        {
+                                            streamCallback: async (partial) => {
+                                                if (!isCallActive || !isProcessingResponse) return;
+
+                                                const twiml = new VoiceResponse();
+                                                twiml.say({
+                                                    voice: 'Polly.Amy-Neural',
+                                                    language: 'en-GB'
+                                                }, partial);
+
+                                                const gather = twiml.gather({
+                                                    input: ['speech'],
+                                                    timeout: 15,
+                                                    action: '/voice/continue',
+                                                    actionOnEmptyResult: true
+                                                });
+
+                                                await client.calls(sid).update({
+                                                    twiml: twiml.toString()
+                                                });
+                                            }
+                                        }
+                                    );
+
+                                    const response = await responsePromise;
+                                    conversationManager.addToHistory(sid, 'ai', response);
+                                    callData.lastResponse = Date.now();
+                                } catch (error) {
+                                    console.error('Error generating response for interruption:', error);
+                                    isProcessingResponse = false;
+                                }
+                            }
+                        }
+                    } else {
+                        // Update pending transcript for non-interruption case
+                        callData.pendingTranscript += ' ' + transcription;
+                        callData.lastTranscriptTime = now;
+                    }
+                }
+            }
+
+            // Check if we should process the accumulated transcript with more responsive timing
+            const timeSinceLastTranscript = now - callData.lastTranscriptTime;
+            const hasCompleteSentence = isCompleteSentence(callData.pendingTranscript);
+            const isLongEnoughPause = timeSinceLastTranscript > 600; // Reduced from 800ms
+
+            if (result.isFinal &&
+                callData.pendingTranscript.trim() &&
+                (hasCompleteSentence || isLongEnoughPause)) {
+
+                // More responsive rate limiting
+                if (now - callData.lastResponse < 400) return; // Reduced from 500ms
+
+                try {
+                    const finalTranscript = callData.pendingTranscript.trim();
+                    console.log('Processing complete query:', finalTranscript);
+
+                    // Check if this is a goodbye/end call message
+                    if (isGoodbyeMessage(finalTranscript)) {
+                        const goodbyeResponse = "Thank you for calling Kayako support! Have a great day!";
+                        const twiml = new VoiceResponse();
+                        twiml.say({
+                            voice: 'Polly.Amy-Neural',
+                            language: 'en-GB'
+                        }, goodbyeResponse);
+
+                        // Add a brief pause before hanging up
+                        twiml.pause({ length: 1 });
+                        twiml.hangup();
+
+                        // Send final response
+                        await client.calls(sid)
+                            .update({
+                                twiml: twiml.toString()
+                            });
+
+                        // Clean up the call
+                        isCallActive = false;
+                        await cleanupCall(sid);
+                        return;
+                    }
+
+                    // Add user's complete message to conversation history
+                    conversationManager.addToHistory(sid, 'user', finalTranscript);
+
+                    // Get conversation state
+                    const conversationState = conversationManager.getConversation(sid);
+                    if (!conversationState) return;
+
+                    // Mark that we're processing a response
+                    isProcessingResponse = true;
+
+                    // Track partial responses
+                    let accumulatedResponse = '';
+                    let lastSentLength = 0;
+                    let isFirstChunk = true;
+                    let lastChunkSent = Date.now();
+
+                    console.log('Starting response streaming...');
+
+                    // Start response generation immediately
+                    const responsePromise = responseGenerator.generateResponse(
+                        finalTranscript,
+                        conversationState,
+                        {
+                            streamCallback: async (partial) => {
+                                try {
+                                    // Don't process if call is no longer active
+                                    if (!isCallActive || !isProcessingResponse) {
+                                        console.log('Call no longer active or not processing, skipping partial response');
+                                        return;
+                                    }
+
+                                    // For first chunk or common Q&A responses, send immediately
+                                    if (isFirstChunk) {
+                                        console.log('First chunk, sending immediate response');
+
+                                        // Wait for a complete thought before sending first chunk
+                                        if (partial.length < 15 || !isCompleteSentence(partial)) {
+                                            console.log('Waiting for more complete first chunk');
+                                            return;
+                                        }
+
+                                        const immediateTwiml = new VoiceResponse();
+                                        immediateTwiml.say({
+                                            voice: 'Polly.Amy-Neural',
+                                            language: 'en-GB'
+                                        }, partial);
+
+                                        // Add gather after response to keep listening
+                                        const gather = immediateTwiml.gather({
+                                            input: ['speech'],
+                                            timeout: 15,
+                                            action: '/voice/continue',
+                                            actionOnEmptyResult: true
+                                        });
+
+                                        console.log('Sending first complete chunk:', partial);
+                                        await client.calls(sid).update({
+                                            twiml: immediateTwiml.toString()
+                                        });
+                                        console.log('First chunk sent successfully');
+
+                                        lastSentLength = partial.length;
+                                        lastChunkSent = Date.now();
+                                        isFirstChunk = false;
+                                        accumulatedResponse = partial;
+                                        return;
+                                    }
+
+                                    // For subsequent chunks, ensure minimum time between chunks
+                                    const timeSinceLastChunk = Date.now() - lastChunkSent;
+                                    if (timeSinceLastChunk < 500) { // Reduced from 1000ms to 500ms
+                                        return;
+                                    }
+
+                                    // Update accumulated response
+                                    accumulatedResponse = partial;
+
+                                    // Get new content since last sent
+                                    const newContent = accumulatedResponse.slice(lastSentLength);
+                                    if (!newContent.trim()) return;
+
+                                    // Send complete sentences
+                                    const sentences = newContent.match(/[^.!?]+[.!?]+/g) || [];
+                                    if (sentences.length === 0) return;
+
+                                    const chunkToSend = sentences.join(' ').trim();
+                                    console.log('Sending complete sentences:', chunkToSend);
+
+                                    const chunkTwiml = new VoiceResponse();
+                                    const gather = chunkTwiml.gather({
+                                        input: ['speech'],
+                                        timeout: 15,
+                                        action: '/voice/continue',
+                                        actionOnEmptyResult: true
+                                    });
+
+                                    gather.say({
+                                        voice: 'Polly.Amy-Neural',
+                                        language: 'en-GB'
+                                    }, chunkToSend);
+
+                                    // Send chunk
+                                    await client.calls(sid).update({
+                                        twiml: chunkTwiml.toString()
+                                    });
+
+                                    lastSentLength = accumulatedResponse.length;
+                                    lastChunkSent = Date.now();
+
+                                    // If this is the last chunk, add a brief pause
+                                    if (isLastChunk) {
+                                        gather.pause({ length: 0.3 });
+                                    }
+
+                                } catch (error) {
+                                    console.error('Error in stream callback:', error);
+                                }
+                            }
+                        }
+                    );
+
+                    try {
+                        // Set up a race between response generation and a delay
+                        const ACKNOWLEDGMENT_DELAY = 2000; // 2 seconds
+                        const acknowledgmentTimer = new Promise(resolve => setTimeout(resolve, ACKNOWLEDGMENT_DELAY));
+
+                        console.log('Waiting for initial response...');
+
+                        // Race between getting the response and the acknowledgment timer
+                        type RaceResult =
+                            | { type: 'response'; data: string }
+                            | { type: 'timeout' };
+
+                        const raceResult = await Promise.race([
+                            responsePromise.then(response => ({ type: 'response', data: response } as const)),
+                            acknowledgmentTimer.then(() => ({ type: 'timeout' } as const))
+                        ]) as RaceResult;
+
+                        if (raceResult.type === 'response') {
+                            // For immediate responses (common Q&A or cached), send directly
+                            if (!accumulatedResponse) {
+                                console.log('Sending immediate full response');
+                                const immediateTwiml = new VoiceResponse();
+                                immediateTwiml.say({
+                                    voice: 'Polly.Amy-Neural',
+                                    language: 'en-GB'
+                                }, raceResult.data);
+
+                                // Add gather after response to keep connection open
+                                const gather = immediateTwiml.gather({
+                                    input: ['speech'],
+                                    timeout: 15,
+                                    action: '/voice/continue',
+                                    actionOnEmptyResult: true
+                                });
+
+                                // Keep the connection open with a subtle prompt
+                                gather.pause({ length: 0.3 });
+
+                                console.log('Updating call with immediate response');
+                                await client.calls(sid).update({
+                                    twiml: immediateTwiml.toString()
+                                });
+                                console.log('Immediate response sent successfully');
+                            }
+                        } else if (raceResult.type === 'timeout' && !accumulatedResponse) {
+                            // Handle potential off-topic questions here
+                            const isObviouslyUnrelated = finalTranscript.toLowerCase().match(
+                                /(weather|stock|bitcoin|crypto|sports|game|movie|food|restaurant|pizza|uber|lyft|taxi)/g
+                            );
+
+                            // Get conversation context
+                            const conversationState = conversationManager.getConversation(sid);
+                            const hasEstablishedContext = (conversationState?.transcriptHistory?.length ?? 0) > 2;
+
+                            // Only redirect if:
+                            // 1. The question is obviously unrelated to customer support/software
+                            // 2. We're at the start of the conversation (no context established)
+                            // 3. The question isn't a follow-up to previous context
+                            if (isObviouslyUnrelated && !hasEstablishedContext) {
+                                console.log('Handling clearly off-topic query with redirection');
+                                const redirectTwiml = new VoiceResponse();
+                                const gather = redirectTwiml.gather({
+                                    input: ['speech'],
+                                    timeout: 15,
+                                    action: '/voice/continue',
+                                    actionOnEmptyResult: true
+                                });
+
+                                gather.say({
+                                    voice: 'Polly.Amy-Neural',
+                                    language: 'en-GB'
+                                }, "I'm specifically trained to help with Kayako's customer support platform. I noticed you might be asking about something else. Would you like to know about Kayako's features or capabilities instead?");
+
+                                await client.calls(sid).update({
+                                    twiml: redirectTwiml.toString()
+                                });
+                                return;
+                            }
+
+                            // For all other cases, proceed with normal response handling
+                            console.log('Sending acknowledgment due to timeout');
+                            const searchingTwiml = new VoiceResponse();
+                            const gather = searchingTwiml.gather({
+                                input: ['speech'],
+                                timeout: 15,
+                                action: '/voice/continue',
+                                actionOnEmptyResult: true
+                            });
+
+                            gather.say({
+                                voice: 'Polly.Amy-Neural',
+                                language: 'en-GB'
+                            }, "One moment.");
+
+                            gather.pause({ length: 0.3 });
+
+                            await client.calls(sid).update({
+                                twiml: searchingTwiml.toString()
+                            });
+                        }
+
+                        // Wait for the full response
+                        console.log('Waiting for full response...');
+                        const response = raceResult.type === 'response' ?
+                            raceResult.data :
+                            await responsePromise;
+
+                        console.log('Full response received:', response);
+
+                        // Send any remaining content
+                        if (accumulatedResponse && accumulatedResponse.length < response.length) {
+                            const remainingContent = response.slice(accumulatedResponse.length).trim();
+                            if (remainingContent) {
+                                console.log('Sending remaining content:', remainingContent);
+                                const finalTwiml = new VoiceResponse();
+                                const gather = finalTwiml.gather({
+                                    input: ['speech'],
+                                    timeout: 15,
+                                    action: '/voice/continue',
+                                    actionOnEmptyResult: true
+                                });
+
+                                gather.say({
+                                    voice: 'Polly.Amy-Neural',
+                                    language: 'en-GB'
+                                }, remainingContent);
+
+                                gather.pause({ length: 0.3 });
+
+                                await client.calls(sid).update({
+                                    twiml: finalTwiml.toString()
+                                });
+                                console.log('Remaining content sent');
+                            }
+                        }
+
+                        // Add the complete response to conversation history
+                        conversationManager.addToHistory(sid, 'ai', response);
+
+                        // Reset state
+                        callData.pendingTranscript = '';
+                        callData.lastResponse = now;
+                        isProcessingResponse = false;
+
+                        console.log('Response handling completed successfully');
+
+                    } catch (error) {
+                        console.error('Error in response handling:', error);
+
+                        // Send a recovery response instead of ending the call
+                        const errorTwiml = new VoiceResponse();
+                        const gather = errorTwiml.gather({
+                            input: ['speech'],
+                            timeout: 15,
+                            action: '/voice/continue',
+                            actionOnEmptyResult: true
+                        });
+
+                        gather.say({
+                            voice: 'Polly.Amy-Neural',
+                            language: 'en-GB'
+                        }, "I'm here to help with questions about Kayako. What would you like to know about our customer support platform?");
+
+                        await client.calls(sid)
+                            .update({
+                                twiml: errorTwiml.toString()
+                            });
+
+                        isProcessingResponse = false;
+                    }
+                } catch (error) {
+                    console.error('Error in response generation:', error);
+                    isProcessingResponse = false;
+
+                    // Simplified error response
+                    const errorTwiml = new VoiceResponse();
+                    const errorGather = errorTwiml.gather({
+                        input: ['speech'],
+                        timeout: 10,
+                        action: '/voice/continue',
+                        actionOnEmptyResult: true
+                    });
+
+                    errorGather.say({
+                        voice: 'Polly.Amy-Neural',
+                        language: 'en-GB'
+                    }, "I apologize, could you please repeat your question?");
+
+                    await client.calls(sid)
+                        .update({
+                            twiml: errorTwiml.toString()
+                        });
+                }
+            }
+        });
+
+        stream.on('error', (error: { code?: string }) => {
+            if (error.code !== 'ERR_STREAM_DESTROYED' && isCallActive) {
+                console.error('Recognition stream error:', error);
+                // Try to recreate stream on error
+                if (callData && isCallActive) {
+                    recognizeStream = googleSpeech.createStreamingRecognition();
+                    callData.recognizeStream = recognizeStream;
+                    setupRecognitionStreamHandler(recognizeStream, sid, callData);
+                }
+            }
+        });
+    }
+
+    // Set up initial stream handler
+    setupRecognitionStreamHandler(recognizeStream, callSid, activeCalls.get(callSid));
 
     // Handle stream end
     ws.on('close', async () => {
@@ -177,479 +690,6 @@ export const handleMediaStream = (ws: WebSocket, callSid: string) => {
         console.error('WebSocket error:', error);
         isCallActive = false;
         await cleanupCall(callSid);
-    });
-
-    recognizeStream.on('error', (error: { code?: string }) => {
-        // Only log non-destroyed stream errors
-        if (error.code !== 'ERR_STREAM_DESTROYED' && isCallActive) {
-            console.error('Recognition stream error:', error);
-        }
-    });
-
-    // Handle transcription results with interruption support
-    recognizeStream.on('data', async (data: any) => {
-        const callData = activeCalls.get(callSid);
-        if (!callData || !isCallActive) return;
-
-        const result = data.results[0];
-        if (!result) return;
-
-        const transcription = result.alternatives[0].transcript;
-        const now = Date.now();
-
-        // Always log transcription immediately for debugging
-        console.log('Real-time transcription:', transcription, 'isFinal:', result.isFinal);
-
-        // Start transcription immediately for any non-empty input
-        if (transcription.trim()) {
-            // Reset the response timer on any new speech
-            callData.lastTranscriptTime = now;
-
-            // For non-final results, check for potential interruptions
-            if (!result.isFinal) {
-                // Detect user starting to speak with more lenient criteria
-                if (isProcessingResponse &&
-                    transcription.trim().length > 8 && // Reduced from 15 to detect speech earlier
-                    !transcription.toLowerCase().match(/^(um|uh|okay|oh)\b/i)) {
-
-                    console.log('User started speaking, stopping current response');
-                    // Immediately stop the current response
-                    isProcessingResponse = false;
-
-                    // Send a silent gather to stop current speech and start listening
-                    const interruptTwiml = new VoiceResponse();
-                    const gather = interruptTwiml.gather({
-                        input: ['speech'],
-                        timeout: 15,
-                        action: '/voice/continue',
-                        actionOnEmptyResult: true
-                    });
-                    gather.pause({ length: 0.1 });
-
-                    try {
-                        await client.calls(callSid).update({
-                            twiml: interruptTwiml.toString()
-                        });
-                        console.log('Successfully interrupted current response');
-                    } catch (error) {
-                        console.error('Error interrupting response:', error);
-                    }
-
-                    // Start preparing for potential response while waiting for final result
-                    callData.pendingTranscript = transcription;
-                }
-            } else {
-                // For final results, handle with more context
-                if (isProcessingResponse) {
-                    // Verify this is a real interruption with slightly relaxed criteria
-                    const isRealInterruption =
-                        transcription.trim().length > 15 && // Reduced from 20
-                        !transcription.toLowerCase().includes('thank') &&
-                        !transcription.toLowerCase().match(/^(um|uh|like|so|and|but|okay)\b/i) &&
-                        Date.now() - callData.lastResponse > 1500; // Reduced from 2000ms
-
-                    if (isRealInterruption) {
-                        console.log('Confirmed interruption detected:', transcription);
-                        isProcessingResponse = false;
-
-                        // Process the interruption immediately
-                        const finalTranscript = transcription.trim();
-                        console.log('Processing confirmed interruption:', finalTranscript);
-
-                        // Add user's message to conversation history
-                        conversationManager.addToHistory(callSid, 'user', finalTranscript);
-
-                        // Get conversation state and generate response
-                        const conversationState = conversationManager.getConversation(callSid);
-                        if (conversationState) {
-                            isProcessingResponse = true;
-
-                            try {
-                                // Generate and handle the response
-                                const responsePromise = responseGenerator.generateResponse(
-                                    finalTranscript,
-                                    conversationState,
-                                    {
-                                        streamCallback: async (partial) => {
-                                            if (!isCallActive || !isProcessingResponse) return;
-
-                                            const twiml = new VoiceResponse();
-                                            twiml.say({
-                                                voice: 'Polly.Amy-Neural',
-                                                language: 'en-GB'
-                                            }, partial);
-
-                                            const gather = twiml.gather({
-                                                input: ['speech'],
-                                                timeout: 15,
-                                                action: '/voice/continue',
-                                                actionOnEmptyResult: true
-                                            });
-
-                                            await client.calls(callSid).update({
-                                                twiml: twiml.toString()
-                                            });
-                                        }
-                                    }
-                                );
-
-                                const response = await responsePromise;
-                                conversationManager.addToHistory(callSid, 'ai', response);
-                                callData.lastResponse = Date.now();
-                            } catch (error) {
-                                console.error('Error generating response for interruption:', error);
-                                isProcessingResponse = false;
-                            }
-                        }
-                    }
-                } else {
-                    // Update pending transcript for non-interruption case
-                    callData.pendingTranscript += ' ' + transcription;
-                    callData.lastTranscriptTime = now;
-                }
-            }
-        }
-
-        // Check if we should process the accumulated transcript with more responsive timing
-        const timeSinceLastTranscript = now - callData.lastTranscriptTime;
-        const hasCompleteSentence = isCompleteSentence(callData.pendingTranscript);
-        const isLongEnoughPause = timeSinceLastTranscript > 600; // Reduced from 800ms
-
-        if (result.isFinal &&
-            callData.pendingTranscript.trim() &&
-            (hasCompleteSentence || isLongEnoughPause)) {
-
-            // More responsive rate limiting
-            if (now - callData.lastResponse < 400) return; // Reduced from 500ms
-
-            try {
-                const finalTranscript = callData.pendingTranscript.trim();
-                console.log('Processing complete query:', finalTranscript);
-
-                // Check if this is a goodbye/end call message
-                if (isGoodbyeMessage(finalTranscript)) {
-                    const goodbyeResponse = "Thank you for calling Kayako support! Have a great day!";
-                    const twiml = new VoiceResponse();
-                    twiml.say({
-                        voice: 'Polly.Amy-Neural',
-                        language: 'en-GB'
-                    }, goodbyeResponse);
-
-                    // Add a brief pause before hanging up
-                    twiml.pause({ length: 1 });
-                    twiml.hangup();
-
-                    // Send final response
-                    await client.calls(callSid)
-                        .update({
-                            twiml: twiml.toString()
-                        });
-
-                    // Clean up the call
-                    isCallActive = false;
-                    await cleanupCall(callSid);
-                    return;
-                }
-
-                // Add user's complete message to conversation history
-                conversationManager.addToHistory(callSid, 'user', finalTranscript);
-
-                // Get conversation state
-                const conversationState = conversationManager.getConversation(callSid);
-                if (!conversationState) return;
-
-                // Mark that we're processing a response
-                isProcessingResponse = true;
-
-                // Track partial responses
-                let accumulatedResponse = '';
-                let lastSentLength = 0;
-                let isFirstChunk = true;
-                let lastChunkSent = Date.now();
-
-                console.log('Starting response streaming...');
-
-                // Start response generation immediately
-                const responsePromise = responseGenerator.generateResponse(
-                    finalTranscript,
-                    conversationState,
-                    {
-                        streamCallback: async (partial) => {
-                            try {
-                                // Don't process if call is no longer active
-                                if (!isCallActive || !isProcessingResponse) {
-                                    console.log('Call no longer active or not processing, skipping partial response');
-                                    return;
-                                }
-
-                                // For first chunk or common Q&A responses, send immediately
-                                if (isFirstChunk) {
-                                    console.log('First chunk, sending immediate response');
-
-                                    // Wait for a complete thought before sending first chunk
-                                    if (partial.length < 15 || !isCompleteSentence(partial)) {
-                                        console.log('Waiting for more complete first chunk');
-                                        return;
-                                    }
-
-                                    const immediateTwiml = new VoiceResponse();
-                                    immediateTwiml.say({
-                                        voice: 'Polly.Amy-Neural',
-                                        language: 'en-GB'
-                                    }, partial);
-
-                                    // Add gather after response to keep listening
-                                    const gather = immediateTwiml.gather({
-                                        input: ['speech'],
-                                        timeout: 15,
-                                        action: '/voice/continue',
-                                        actionOnEmptyResult: true
-                                    });
-
-                                    console.log('Sending first complete chunk:', partial);
-                                    await client.calls(callSid).update({
-                                        twiml: immediateTwiml.toString()
-                                    });
-                                    console.log('First chunk sent successfully');
-
-                                    lastSentLength = partial.length;
-                                    lastChunkSent = Date.now();
-                                    isFirstChunk = false;
-                                    return;
-                                }
-
-                                // For subsequent chunks, ensure minimum time between chunks
-                                const timeSinceLastChunk = Date.now() - lastChunkSent;
-                                if (timeSinceLastChunk < 500) { // Reduced from 1000ms to 500ms
-                                    return;
-                                }
-
-                                // Update accumulated response
-                                accumulatedResponse = partial;
-
-                                // Get new content since last sent
-                                const newContent = accumulatedResponse.slice(lastSentLength);
-                                if (!newContent.trim()) return;
-
-                                // Send complete sentences
-                                const sentences = newContent.match(/[^.!?]+[.!?]+/g) || [];
-                                if (sentences.length === 0) return;
-
-                                const chunkToSend = sentences.join(' ').trim();
-                                console.log('Sending complete sentences:', chunkToSend);
-
-                                const chunkTwiml = new VoiceResponse();
-                                const gather = chunkTwiml.gather({
-                                    input: ['speech'],
-                                    timeout: 15,
-                                    action: '/voice/continue',
-                                    actionOnEmptyResult: true
-                                });
-
-                                gather.say({
-                                    voice: 'Polly.Amy-Neural',
-                                    language: 'en-GB'
-                                }, chunkToSend);
-
-                                // Send chunk
-                                await client.calls(callSid).update({
-                                    twiml: chunkTwiml.toString()
-                                });
-
-                                lastSentLength += chunkToSend.length;
-                                lastChunkSent = Date.now();
-
-                            } catch (error) {
-                                console.error('Error in stream callback:', error);
-                            }
-                        }
-                    }
-                );
-
-                try {
-                    // Set up a race between response generation and a delay
-                    const ACKNOWLEDGMENT_DELAY = 2000; // 2 seconds
-                    const acknowledgmentTimer = new Promise(resolve => setTimeout(resolve, ACKNOWLEDGMENT_DELAY));
-
-                    console.log('Waiting for initial response...');
-
-                    // Race between getting the response and the acknowledgment timer
-                    type RaceResult =
-                        | { type: 'response'; data: string }
-                        | { type: 'timeout' };
-
-                    const raceResult = await Promise.race([
-                        responsePromise.then(response => ({ type: 'response', data: response } as const)),
-                        acknowledgmentTimer.then(() => ({ type: 'timeout' } as const))
-                    ]) as RaceResult;
-
-                    if (raceResult.type === 'response') {
-                        // For immediate responses (common Q&A or cached), send directly
-                        if (!accumulatedResponse) {
-                            console.log('Sending immediate full response');
-                            const immediateTwiml = new VoiceResponse();
-                            immediateTwiml.say({
-                                voice: 'Polly.Amy-Neural',
-                                language: 'en-GB'
-                            }, raceResult.data);
-
-                            // Add gather after response to keep connection open
-                            const gather = immediateTwiml.gather({
-                                input: ['speech'],
-                                timeout: 15,
-                                action: '/voice/continue',
-                                actionOnEmptyResult: true
-                            });
-
-                            // Keep the connection open with a subtle prompt
-                            gather.pause({ length: 0.3 });
-
-                            console.log('Updating call with immediate response');
-                            await client.calls(callSid).update({
-                                twiml: immediateTwiml.toString()
-                            });
-                            console.log('Immediate response sent successfully');
-                        }
-                    } else if (raceResult.type === 'timeout' && !accumulatedResponse) {
-                        // Handle potential off-topic questions here
-                        const isOffTopic = !finalTranscript.toLowerCase().includes('kayako') &&
-                            !finalTranscript.toLowerCase().includes('support') &&
-                            !finalTranscript.toLowerCase().includes('help');
-
-                        if (isOffTopic) {
-                            console.log('Handling off-topic query with redirection');
-                            const redirectTwiml = new VoiceResponse();
-                            const gather = redirectTwiml.gather({
-                                input: ['speech'],
-                                timeout: 15,
-                                action: '/voice/continue',
-                                actionOnEmptyResult: true
-                            });
-
-                            gather.say({
-                                voice: 'Polly.Amy-Neural',
-                                language: 'en-GB'
-                            }, "I'm specifically trained to help with Kayako's customer support platform. What would you like to know about Kayako's features or capabilities?");
-
-                            await client.calls(callSid).update({
-                                twiml: redirectTwiml.toString()
-                            });
-                            return;
-                        }
-
-                        console.log('Sending acknowledgment due to timeout');
-                        const searchingTwiml = new VoiceResponse();
-                        const gather = searchingTwiml.gather({
-                            input: ['speech'],
-                            timeout: 15,
-                            action: '/voice/continue',
-                            actionOnEmptyResult: true
-                        });
-
-                        gather.say({
-                            voice: 'Polly.Amy-Neural',
-                            language: 'en-GB'
-                        }, "One moment.");
-
-                        gather.pause({ length: 0.3 });
-
-                        await client.calls(callSid).update({
-                            twiml: searchingTwiml.toString()
-                        });
-                    }
-
-                    // Wait for the full response
-                    console.log('Waiting for full response...');
-                    const response = raceResult.type === 'response' ?
-                        raceResult.data :
-                        await responsePromise;
-
-                    console.log('Full response received:', response);
-
-                    // Send any remaining content
-                    if (accumulatedResponse.length > lastSentLength) {
-                        const remainingContent = accumulatedResponse.slice(lastSentLength).trim();
-                        if (remainingContent) {
-                            console.log('Sending remaining content:', remainingContent);
-                            const finalTwiml = new VoiceResponse();
-                            const gather = finalTwiml.gather({
-                                input: ['speech'],
-                                timeout: 10,
-                                action: '/voice/continue',
-                                actionOnEmptyResult: true
-                            });
-
-                            gather.say({
-                                voice: 'Polly.Amy-Neural',
-                                language: 'en-GB'
-                            }, remainingContent);
-
-                            gather.pause({ length: 0.2 });
-
-                            await client.calls(callSid).update({
-                                twiml: finalTwiml.toString()
-                            });
-                            console.log('Remaining content sent');
-                        }
-                    }
-
-                    // Add the complete response to conversation history
-                    conversationManager.addToHistory(callSid, 'ai', response);
-
-                    // Reset state
-                    callData.pendingTranscript = '';
-                    callData.lastResponse = now;
-                    isProcessingResponse = false;
-
-                    console.log('Response handling completed successfully');
-
-                } catch (error) {
-                    console.error('Error in response handling:', error);
-
-                    // Send a recovery response instead of ending the call
-                    const errorTwiml = new VoiceResponse();
-                    const gather = errorTwiml.gather({
-                        input: ['speech'],
-                        timeout: 15,
-                        action: '/voice/continue',
-                        actionOnEmptyResult: true
-                    });
-
-                    gather.say({
-                        voice: 'Polly.Amy-Neural',
-                        language: 'en-GB'
-                    }, "I'm here to help with questions about Kayako. What would you like to know about our customer support platform?");
-
-                    await client.calls(callSid).update({
-                        twiml: errorTwiml.toString()
-                    });
-
-                    isProcessingResponse = false;
-                }
-            } catch (error) {
-                console.error('Error in response generation:', error);
-                isProcessingResponse = false;
-
-                // Simplified error response
-                const errorTwiml = new VoiceResponse();
-                const errorGather = errorTwiml.gather({
-                    input: ['speech'],
-                    timeout: 10,
-                    action: '/voice/continue',
-                    actionOnEmptyResult: true
-                });
-
-                errorGather.say({
-                    voice: 'Polly.Amy-Neural',
-                    language: 'en-GB'
-                }, "I apologize, could you please repeat your question?");
-
-                await client.calls(callSid)
-                    .update({
-                        twiml: errorTwiml.toString()
-                    });
-            }
-        }
     });
 };
 

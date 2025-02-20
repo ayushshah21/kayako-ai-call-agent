@@ -1,6 +1,7 @@
 import { KayakoService } from './kayakoService';
 import { ConversationState } from '../conversation/types';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import knowledgeBaseData from '../data/knowledge_base.json';
 
 interface ResponseOptions {
     streamCallback?: (partialResponse: string) => Promise<void>;
@@ -8,29 +9,8 @@ interface ResponseOptions {
 }
 
 interface KnowledgeBaseCache {
-    articles: any[];
-    timestamp: number;
     articleContext: string;
-}
-
-interface KayakoArticle {
-    id: string;
-    titles: Array<{
-        id: number;
-        translation?: string;
-        resource_type: string;
-    }>;
-    contents: Array<{
-        id: number;
-        translation?: string;
-        resource_type: string;
-    }>;
-    status: string;
-    category?: {
-        id: string;
-        title: string;
-    };
-    resource_url: string;
+    timestamp: number;
 }
 
 interface CommonQA {
@@ -50,7 +30,6 @@ export class ResponseGenerator {
     }> = new Map();
     private knowledgeBaseCache: KnowledgeBaseCache | null = null;
     private readonly CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
-    private readonly KB_CACHE_TTL = 5 * 60 * 1000; // 5 minutes for KB cache
     private lastGeminiCall: number = 0;
     private readonly RATE_LIMIT_DELAY = 1000; // 1 second between calls
 
@@ -118,47 +97,63 @@ export class ResponseGenerator {
             },
         });
         console.log('Initialized Gemini 1.5 Pro model');
-        // Pre-fetch articles on startup
+        // Initialize knowledge base context
         this.initializeKnowledgeBase();
     }
 
     private async initializeKnowledgeBase() {
         try {
-            console.log('Pre-fetching knowledge base articles...');
+            console.log('Initializing knowledge base context...');
             await this.refreshKnowledgeBase();
-            // Set up periodic refresh
-            setInterval(() => this.refreshKnowledgeBase(), this.KB_CACHE_TTL);
         } catch (error) {
-            console.error('Error pre-fetching knowledge base:', error);
+            console.error('Error initializing knowledge base:', error);
         }
     }
 
     private async refreshKnowledgeBase(): Promise<string> {
-        console.log('Refreshing knowledge base cache...');
         try {
-            const articles = await this.kayakoService.searchArticles('');
-            console.log(`Fetched ${articles.length} articles from knowledge base`);
+            // Prepare context more efficiently - only include essential information
+            const articleContext = knowledgeBaseData.articles
+                .map(article => {
+                    // Create a concise summary combining key information
+                    const keyPoints = [article.content.overview];
 
-            // Prepare context from all articles
-            const articleContext = articles
-                .map((article: KayakoArticle) => {
-                    const title = article.titles?.[0]?.translation || 'Untitled';
-                    const content = article.contents?.[0]?.translation?.replace(/<[^>]*>/g, '') || 'No content available';
-                    return `Article [${article.id}]: ${title}\nContent: ${content}`;
+                    // Add only the most relevant solution steps
+                    if (article.content.solution) {
+                        keyPoints.push(article.content.solution.join(' '));
+                    }
+
+                    // Add only critical notes
+                    if (article.content.important_notes) {
+                        const notes = Array.isArray(article.content.important_notes)
+                            ? article.content.important_notes[0] // Just take the first/most important note
+                            : article.content.important_notes;
+                        keyPoints.push(notes);
+                    }
+
+                    // Add only highly relevant FAQ answers
+                    const relevantFaqs = article.faq
+                        .slice(0, 2) // Limit to 2 most relevant FAQs
+                        .map(qa => qa.answer)
+                        .join(' ');
+
+                    if (relevantFaqs) {
+                        keyPoints.push(relevantFaqs);
+                    }
+
+                    return `${article.title}: ${keyPoints.join(' ')}`;
                 })
                 .join('\n\n');
 
             // Update cache
             this.knowledgeBaseCache = {
-                articles,
-                timestamp: Date.now(),
-                articleContext
+                articleContext,
+                timestamp: Date.now()
             };
 
             return articleContext;
         } catch (error) {
             console.error('Error refreshing knowledge base:', error);
-            // If we have existing cache, use it even if expired
             if (this.knowledgeBaseCache?.articleContext) {
                 return this.knowledgeBaseCache.articleContext;
             }
@@ -206,18 +201,45 @@ export class ResponseGenerator {
         let lastError: Error | null = null;
         let fallbackModel = null;
 
+        // Truncate the prompt if it's too long
+        const maxPromptLength = 4000; // Conservative limit
+        const truncatedPrompt = prompt.length > maxPromptLength
+            ? prompt.slice(0, maxPromptLength) + "..."
+            : prompt;
+
+        const systemPrompt = `You are a helpful customer support AI assistant on a phone call.
+Use the knowledge provided to give direct, natural responses as if speaking to someone.
+Never reference articles, documentation, or written materials in your responses.
+Keep responses concise and conversational.
+
+Guidelines:
+1. Speak naturally and directly to the customer
+2. Don't mention reading articles or documentation
+3. Keep responses focused and brief (2-3 sentences when possible)
+4. If you need to list steps, present them conversationally
+5. Use a friendly, helpful tone
+
+Knowledge Context:
+${truncatedPrompt}
+
+Response:`;
+
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                // Rate limiting
+                // Rate limiting with exponential backoff
                 const now = Date.now();
                 const timeSinceLastCall = now - this.lastGeminiCall;
-                if (timeSinceLastCall < this.RATE_LIMIT_DELAY) {
-                    await new Promise(resolve => setTimeout(resolve, this.RATE_LIMIT_DELAY - timeSinceLastCall));
+                const backoffDelay = attempt === 1
+                    ? this.RATE_LIMIT_DELAY
+                    : this.RATE_LIMIT_DELAY * Math.pow(2, attempt - 1);
+
+                if (timeSinceLastCall < backoffDelay) {
+                    await new Promise(resolve => setTimeout(resolve, backoffDelay - timeSinceLastCall));
                 }
 
                 // Try cached response first on retry attempts
                 if (attempt > 1) {
-                    const cacheKey = this.generateCacheKey(prompt);
+                    const cacheKey = this.generateCacheKey(truncatedPrompt);
                     const cachedResponse = this.responseCache.get(cacheKey);
                     if (cachedResponse && Date.now() - cachedResponse.timestamp < this.CACHE_TTL) {
                         console.log('Using cached response on retry attempt');
@@ -225,7 +247,7 @@ export class ResponseGenerator {
                     }
 
                     // Try common Q&A as second fallback
-                    const commonQA = this.matchCommonQA(prompt);
+                    const commonQA = this.matchCommonQA(truncatedPrompt);
                     if (commonQA) {
                         console.log('Using common Q&A on retry attempt');
                         return commonQA.response;
@@ -248,10 +270,11 @@ export class ResponseGenerator {
                 // Use fallback model on last attempt if main model failed
                 const modelToUse = (attempt === maxRetries && fallbackModel) ? fallbackModel : this.model;
 
+                // Add timeout for the request
                 const result = await Promise.race([
-                    modelToUse.generateContent(prompt),
+                    modelToUse.generateContent(systemPrompt),
                     new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Gemini request timeout')), 8000)
+                        setTimeout(() => reject(new Error('Request timeout')), 8000)
                     )
                 ]);
 
@@ -261,10 +284,10 @@ export class ResponseGenerator {
                 lastError = error;
                 console.log(`Attempt ${attempt} failed:`, error.message);
 
-                // Special handling for 503 errors
+                // Special handling for 503 errors - use more aggressive fallback
                 if (error.status === 503) {
-                    // Immediate fallback to simpler response
-                    const simplifiedPrompt = `Give a very brief 1-2 sentence response about Kayako's features based on: ${prompt.slice(-100)}`;
+                    // Try to use a simpler prompt with just the essential info
+                    const simplifiedPrompt = `Give a brief response about Kayako's ${truncatedPrompt.slice(-100)}`;
                     try {
                         if (fallbackModel) {
                             const fallbackResult = await fallbackModel.generateContent(simplifiedPrompt);
@@ -273,18 +296,26 @@ export class ResponseGenerator {
                     } catch (fallbackError) {
                         console.error('Fallback model also failed:', fallbackError);
                     }
+
+                    // If both models fail, use common Q&A or cached response as last resort
+                    const commonQA = this.matchCommonQA(truncatedPrompt);
+                    if (commonQA) return commonQA.response;
+
+                    const cacheKey = this.generateCacheKey(truncatedPrompt);
+                    const cachedResponse = this.responseCache.get(cacheKey);
+                    if (cachedResponse) return cachedResponse.response;
                 }
 
-                // For rate limit errors, wait longer
+                // For rate limit errors, use exponential backoff
                 if (error.status === 429) {
-                    const waitTime = attempt * 2000;
+                    const waitTime = Math.min(attempt * 2000, 10000); // Cap at 10 seconds
                     await new Promise(resolve => setTimeout(resolve, waitTime));
                 }
             }
         }
 
-        // Final fallback if all retries fail
-        return "Kayako offers comprehensive customer support features including multi-channel support, automation, and ticketing. What specific aspect would you like to know more about?";
+        // Final fallback response
+        return "I understand you're asking about Kayako's features. Let me help you with that. What specific aspect would you like to know more about?";
     }
 
     async generateResponse(

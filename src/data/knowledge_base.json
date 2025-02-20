@@ -1,0 +1,319 @@
+{
+    "metadata": {
+        "total_articles": 14,
+        "categories": [
+            "Branding",
+            "Administrator Management"
+        ],
+        "last_updated": "2024-03-21"
+    },
+    "articles": [
+        {
+            "id": "17786846381714",
+            "title": "How to Make Your AdvocateHub Platform Unsearchable by Search Engines",
+            "category": "Branding",
+            "summary": "Instructions for making an AdvocateHub platform unsearchable by search engines by adjusting platform settings.",
+            "content": {
+                "overview": "If your AdvocateHub platform is showing up in search engine results against your wishes, it's likely due to the lack of specific instructions given to search engine crawlers. This can be resolved by adjusting a setting within your AdvocateHub platform.",
+                "solution": [
+                    "Navigate to Settings > Advocate Program > Elevate Branding menu",
+                    "Uncheck the 'Make Hub indexable by search engines like Google' checkbox"
+                ],
+                "notes": "Please note that your platform will not be removed from search results immediately. It can take weeks for Google and other search engines to remove it from their index."
+            },
+            "tags": ["AdvocateHub", "Search Engine Optimization", "Visibility", "Settings"],
+            "faq": [
+                {
+                    "question": "Why is my AdvocateHub platform showing up in search engine results?",
+                    "answer": "Your platform may be showing up in search results because there are no specific instructions given to search engine crawlers to not index your site."
+                },
+                {
+                    "question": "How long will it take for my platform to be removed from search engine results?",
+                    "answer": "It can take weeks for search engines to remove your platform from their index."
+                },
+                {
+                    "question": "Can I make my platform searchable by search engines again in the future?",
+                    "answer": "Yes, you can make your platform searchable again by rechecking the 'Make Hub indexable by search engines like Google' checkbox in your AdvocateHub settings."
+                }
+            ]
+        },
+        {
+            "id": "16470574563730",
+            "title": "Removing Social Login Buttons from Elevated Login Page",
+            "category": "Branding",
+            "summary": "Step-by-step guide for removing social login buttons from an Elevated Hub's login page.",
+            "content": {
+                "overview": "This article provides instructions for removing social login buttons from the login page of an Elevated Hub.",
+                "steps": [
+                    "Navigate to Admin > Gear icon > Settings",
+                    "Select Branding from the settings menu",
+                    "Add custom CSS code to remove social login buttons",
+                    "Save changes to Branding settings",
+                    "Go to Elevated Branding page",
+                    "Add same CSS code to Sign-in/Sign-up HTML section",
+                    "Save changes to Elevated Branding settings"
+                ]
+            },
+            "tags": ["Login", "Social Login", "CSS", "Branding", "Elevated Hub"],
+            "faq": [
+                {
+                    "question": "Will the changes affect all users?",
+                    "answer": "Yes, once the changes are saved, they will apply to the login page for all users."
+                },
+                {
+                    "question": "Is it necessary to have elevated access to make these changes?",
+                    "answer": "Yes, elevated access is required for certain branding settings, as indicated in the steps for navigating to Elevated Branding Settings."
+                }
+            ]
+        },
+        {
+            "id": "16156588840082",
+            "title": "Customizing the CSS of an AdvocateHub Web Element",
+            "category": "Branding",
+            "summary": "Guide on how to identify and customize CSS elements within an AdvocateHub.",
+            "content": {
+                "overview": "This guide explains how to adjust the color and styling of elements within your Classic AdvocateHub using Chrome's developer tools and the Branding settings.",
+                "steps": [
+                    "Navigate to the Hub and locate the element to adjust",
+                    "Right-click and select 'Inspect' to open developer tools",
+                    "Identify the specific CSS class or ID",
+                    "Test changes directly in developer tools",
+                    "Navigate to Hub Admin > Settings > Advocate Program > Branding",
+                    "Add or modify CSS in the appropriate Custom JS/CSS Field",
+                    "Save changes and validate"
+                ],
+                "best_practices": [
+                    "Use an external IDE for editing complex CSS",
+                    "Document changes with comments",
+                    "Test changes thoroughly before saving",
+                    "Verify changes across different browsers"
+                ]
+            },
+            "tags": ["CSS", "Customization", "Web Elements", "Branding", "Developer Tools"],
+            "faq": [
+                {
+                    "question": "What should I do if I cannot find the CSS rule in the admin view?",
+                    "answer": "Check for an external CSS sheet or copy the CSS code into a text editor for easier searching and editing."
+                },
+                {
+                    "question": "How do I ensure the change is applied correctly?",
+                    "answer": "After updating the CSS code, save the changes and refresh the hub to verify. Document changes with comments."
+                }
+            ]
+        },
+        {
+            "id": "15751124061202",
+            "title": "Advanced Branding: Custom Headers, Fonts, and CSS Stylesheets",
+            "category": "Branding",
+            "summary": "Guide on implementing advanced branding features including custom headers, fonts, and CSS stylesheets.",
+            "content": {
+                "overview": "This article provides a comprehensive guide on enhancing your AdvocateHub's branding through custom HTML, CSS, and JavaScript. It covers custom headers, banners, footers, fonts, and loading icons.",
+                "important_notice": "You will need someone adept in CSS/HTML to create, maintain and support this custom work.",
+                "features": {
+                    "custom_header": {
+                        "description": "Insert custom header above the AdvocateHub header",
+                        "location": "Settings > Advocate Program > Branding"
+                    },
+                    "custom_banner": {
+                        "description": "Create advanced banner designs beyond basic options",
+                        "requires": "Advanced Branding contract"
+                    },
+                    "custom_footer": {
+                        "description": "Add custom footer content",
+                        "requires": "Advanced Branding contract"
+                    },
+                    "custom_javascript": {
+                        "description": "Add custom JavaScript for tracking or analytics",
+                        "warning": "Using JavaScript is extremely risky and not recommended. Only Influitive can add JavaScript to your hub."
+                    },
+                    "influitive_branding": {
+                        "description": "Remove the 'Powered by Influitive' footer from all pages",
+                        "location": "Settings > Advocate Program > Branding"
+                    },
+                    "animated_loading_icon": {
+                        "description": "Change the loading icon displayed during content loading",
+                        "requirements": {
+                            "file_type": "animated .gif",
+                            "background": "transparent",
+                            "dimensions": ["128px x 128px", "64px x 64px"],
+                            "note": "Only available on classic UI, not on Elevate"
+                        }
+                    },
+                    "custom_font": {
+                        "description": "Use custom fonts with hosted URL",
+                        "requirements": {
+                            "google_fonts": "Use the Embed Link format",
+                            "note": "Contact support if font isn't applying everywhere"
+                        }
+                    },
+                    "custom_css": {
+                        "description": "Add custom CSS via URL",
+                        "note": "CSS file will be included on all advocate-facing pages"
+                    },
+                    "branded_keywords": {
+                        "description": "Customize default keywords (available since April 2020)",
+                        "customizable_terms": [
+                            "Challenges",
+                            "Advocates",
+                            "Referrals",
+                            "Leaderboard",
+                            "Rewards",
+                            "Daily Bonus"
+                        ],
+                        "note": "Feature not visible in UI, contact CSM to enable"
+                    }
+                }
+            },
+            "tags": ["Advanced Branding", "Custom Headers", "Fonts", "CSS", "JavaScript"],
+            "faq": [
+                {
+                    "question": "Can I add custom JavaScript to my AdvocateHub on my own?",
+                    "answer": "No, adding custom JavaScript requires Influitive support team involvement due to potential risks."
+                },
+                {
+                    "question": "How can I change the default loading icon?",
+                    "answer": "Upload an animated .gif file with a transparent background, sized at 128px by 128px or 64px by 64px."
+                },
+                {
+                    "question": "Is it possible to remove the 'Powered by Influitive' footer?",
+                    "answer": "Yes, you have the ability to remove this footer from all pages of your AdvocateHub."
+                }
+            ]
+        },
+        {
+            "id": "16745538677394",
+            "title": "Single Sign-On (SSO) Issues for Admin Users",
+            "category": "Administrator Management",
+            "summary": "Troubleshooting guide for SSO issues affecting administrator users.",
+            "content": {
+                "overview": "Some admin users have been experiencing issues with Single Sign-On (SSO). The problem is typically associated with login email mismatches.",
+                "solution": [
+                    "Identify the user experiencing the SSO issue",
+                    "Check the user's profile for the presence of another email",
+                    "Update the email in the user's profile to the correct one",
+                    "Confirm if the SSO is now working for the user"
+                ],
+                "important_notes": "If facing issues with email updates, refer to the Change email address article."
+            },
+            "tags": ["Email Update", "Admin Users", "ClubZen", "SSO"],
+            "faq": [
+                {
+                    "question": "What causes the SSO issue for admin users on ClubZen?",
+                    "answer": "The issue is caused by the presence of another email in the user's profile."
+                },
+                {
+                    "question": "How can I resolve the SSO issue?",
+                    "answer": "Check the user's profile for the presence of another email and update it to the correct one."
+                }
+            ]
+        },
+        {
+            "id": "15751277958162",
+            "title": "Administrator Role Permissions Management",
+            "category": "Administrator Management",
+            "summary": "Guide for managing user roles and permissions within an AdvocateHub.",
+            "content": {
+                "overview": "As your Advocate Marketing program grows, you may need help from organization members to manage daily tasks. Role Management allows you to grant specific permissions while restricting access to other areas.",
+                "default_roles": {
+                    "administrator": "Full access to all features",
+                    "author": "Most admin abilities except publishing/approving challenges and rewards"
+                },
+                "permissions_types": [
+                    "Lens viewing ability",
+                    "Member Interaction",
+                    "API Access",
+                    "Administrative View Access"
+                ],
+                "steps": {
+                    "create_role": [
+                        "Navigate to Settings > System > Role Management",
+                        "Click Add Role",
+                        "Enter role name and description",
+                        "Configure permissions",
+                        "Create Role"
+                    ],
+                    "assign_role": "Use User Management settings to assign roles to users",
+                    "delete_role": "Hover over role and click 'x' (must reassign users first)"
+                }
+            },
+            "tags": ["Administrator", "Permissions", "Roles", "Access Management"],
+            "faq": [
+                {
+                    "question": "What are the main differences between an Administrator and an Author?",
+                    "answer": "An Administrator has full control, while an Author can create content but cannot publish or approve challenges and rewards."
+                },
+                {
+                    "question": "Can I delete a user role that has users associated with it?",
+                    "answer": "No, you must first reassign the users to different roles before deleting the original role."
+                }
+            ]
+        },
+        {
+            "id": "15751098083986",
+            "title": "Contact Admin Form",
+            "category": "Administrator Management",
+            "summary": "Guide for using the Contact Admin form on the program's sign-in/sign-up page.",
+            "content": {
+                "overview": "The Contact Admin form is a tool for visitors to reach out to the administration team of a program.",
+                "access_methods": [
+                    "Click 'Contact Admin' link at bottom of sign-in/sign-up page",
+                    "Direct URL access: https://your-hub.com/contact_admin"
+                ],
+                "form_fields": [
+                    "Name",
+                    "Email",
+                    "Message Subject",
+                    "Message"
+                ],
+                "process": {
+                    "submission": "Form includes invisible reCAPTCHA validation",
+                    "confirmation": "User receives confirmation message",
+                    "notification": "Email sent to Primary Admin(s)"
+                }
+            },
+            "tags": ["Contact Form", "Admin Communication", "User Support"],
+            "faq": [
+                {
+                    "question": "How do I access the Contact Admin form?",
+                    "answer": "Click the 'Contact Admin' link at the bottom of your program's sign-in/sign-up page or visit https://your-hub.com/contact_admin directly."
+                },
+                {
+                    "question": "What happens after I submit the Contact Admin form?",
+                    "answer": "You'll receive a confirmation message, and an email will be sent to the Primary Admin(s) of the Hub."
+                }
+            ]
+        },
+        {
+            "id": "15751047152018",
+            "title": "Switching an Administrator Account to an Advocate Account",
+            "category": "Administrator Management",
+            "summary": "Process for converting an administrator account to an advocate account.",
+            "content": {
+                "overview": "This process must be done manually as there is no automatic downgrade available. Each email address can only be associated with one user in the hub.",
+                "steps": [
+                    "Log in with admin credentials and navigate to Settings > System > User Management",
+                    "Click on the name of the administrator to convert",
+                    "Tick the 'Disable Account' checkbox",
+                    "Change the Email address to a temporary one",
+                    "Invite the disabled administrator as an advocate using their original email"
+                ],
+                "important_notes": [
+                    "No automatic downgrade process available",
+                    "Email addresses must be unique within the hub",
+                    "Process requires manual intervention"
+                ]
+            },
+            "tags": ["Account Management", "Administrator", "Advocate", "User Conversion"],
+            "faq": [
+                {
+                    "question": "Can I automatically downgrade an administrator account to an advocate account?",
+                    "answer": "No, the process must be done manually following the steps provided."
+                },
+                {
+                    "question": "Can the same email address be used for both an administrator and an advocate account?",
+                    "answer": "No, each email address can only be registered to one user in the hub."
+                }
+            ]
+        }
+    ]
+} 
